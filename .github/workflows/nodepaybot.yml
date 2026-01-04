@@ -9,6 +9,7 @@ jobs:
     env:
       NODEPAY_TOKENS: ${{ secrets.NODEPAY_TOKENS }}
       NODEPAY_PROXIES: ${{ secrets.NODEPAY_PROXIES }}
+      USE_PROXY: 'yes' # optional: used if you applied the patch above
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -19,32 +20,46 @@ jobs:
           python-version: '3.11'
 
       - name: Install requirements
+        shell: powershell
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
       - name: Create tokens and proxies files from secrets
         shell: powershell
         run: |
-          # Write secrets to files (preserves newlines)
-          Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline
-          Set-Content -Path proxies.txt -Value $env:NODEPAY_PROXIES -NoNewline
+          # Write secrets to files without printing them to logs
+          if ($env:NODEPAY_TOKENS) {
+            Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline -Encoding ASCII
+          } else {
+            New-Item -Path tokens.txt -ItemType File -Force | Out-Null
+          }
+          if ($env:NODEPAY_PROXIES) {
+            Set-Content -Path proxies.txt -Value $env:NODEPAY_PROXIES -NoNewline -Encoding ASCII
+          } else {
+            New-Item -Path proxies.txt -ItemType File -Force | Out-Null
+          }
 
-      - name: Hide sensitive files (Windows hidden attribute)
+      - name: Hide sensitive files
         shell: powershell
         run: |
           attrib +h tokens.txt
           attrib +h proxies.txt
 
-      - name: Run bot (auto-confirm yes)
+      - name: Run bot with automated confirmation fallback
         shell: powershell
         run: |
-          # Pipe 'yes' to run.bat to auto-confirm prompts
-          echo yes | .\run.bat
+          # Create an input file with many 'yes' responses to satisfy interactive prompts
+          1..200 | ForEach-Object { 'yes' } | Out-File -Encoding ASCII input.txt
+          # Run the batch file using redirected stdin
+          .\run.bat < input.txt
+          # Remove the temporary input file
+          Remove-Item -Path input.txt -Force -ErrorAction SilentlyContinue
 
       - name: Cleanup sensitive files
         if: always()
         shell: powershell
         run: |
+          # Remove files and ensure no output of their contents
           Remove-Item -Path tokens.txt -Force -ErrorAction SilentlyContinue
           Remove-Item -Path proxies.txt -Force -ErrorAction SilentlyContinue
