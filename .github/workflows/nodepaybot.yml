@@ -39,8 +39,8 @@ jobs:
       - name: Run bot (auto-confirm yes)
         shell: powershell
         run: |
-          # Pipe 'y' to run.bat to auto-confirm prompts
-          echo y | .\run.bat
+          # Pipe 'yes' to run.bat to auto-confirm prompts
+          echo yes | .\run.bat
 
       - name: Cleanup sensitive files
         if: always()
