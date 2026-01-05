@@ -119,46 +119,61 @@ jobs:
           Write-Output ("proxies.txt length: {0}" -f $len)
           Write-Output ("proxies.txt sample: {0}...{1}" -f $start, $end)
 
-      - name: API test using token (masked) to verify validity
+      - name: API test using token (masked) to verify validity (PowerShell)
         shell: powershell
         run: |
-          $py = @'
-import os, sys, requests
-# Read token from file
-try:
-    with open("tokens.txt","r",encoding="utf-8") as f:
-        token = f.read().strip()
-except Exception as e:
-    print("FAILED: cannot read tokens.txt:", e)
-    sys.exit(1)
-if not token:
-    print("FAILED: token empty")
-    sys.exit(1)
-print("Token length:", len(token))
-print("Token sample:", token[:6] + "..." + token[-6:])
-# Replace the URL below with a NodePay endpoint your bot uses for a quick validation
-API_URL = "https://api.nodepay.ai/v1/profile"
-headers = {"Authorization": "Bearer " + token}
-try:
-    r = requests.get(API_URL, headers=headers, timeout=10)
-    print("API test status:", r.status_code)
-    text = (r.text or "")[:200].replace("\n"," ")
-    print("Response snippet:", text)
-    if r.status_code in (401,403):
-        print("Token appears invalid or expired (401/403).")
-        sys.exit(2)
-    elif r.status_code >= 400:
-        print("API returned error status", r.status_code)
-        sys.exit(3)
-    else:
-        print("API test succeeded (token accepted).")
-except Exception as e:
-    print("API test request failed:", type(e).__name__, e)
-    sys.exit(4)
-'@
-          Set-Content -Path api_test.py -Value $py -Encoding UTF8
-          python api_test.py
-          Remove-Item -Path api_test.py -Force
+          # Read token from file
+          if (-not (Test-Path tokens.txt)) {
+            Write-Error "tokens.txt not found for API test"
+            exit 1
+          }
+          $token = (Get-Content tokens.txt -Raw).Trim()
+          if (-not $token) {
+            Write-Error "Token empty for API test"
+            exit 1
+          }
+          Write-Output ("Token length: {0}" -f $token.Length)
+          $start = $token.Substring(0,[Math]::Min(6,$token.Length))
+          $end = $token.Substring([Math]::Max(0,$token.Length-6))
+          Write-Output ("Token sample: {0}...{1}" -f $start, $end)
+
+          # Build headers
+          $headers = @{ Authorization = "Bearer $token" }
+
+          # Optional: use proxy from proxies.txt if present (PowerShell supports -Proxy and -ProxyCredential)
+          $proxy = ""
+          if (Test-Path proxies.txt) {
+            $proxy = (Get-Content proxies.txt -Raw).Trim()
+          }
+
+          # Replace API_URL with the NodePay endpoint you want to validate against
+          $API_URL = "https://api.nodepay.ai/v1/profile"
+
+          try {
+            if ($proxy) {
+              # If proxy is provided as http(s)://host:port or with credentials, PowerShell's -Proxy accepts a URI
+              $response = Invoke-WebRequest -Uri $API_URL -Headers $headers -UseBasicParsing -Proxy $proxy -TimeoutSec 10
+            } else {
+              $response = Invoke-WebRequest -Uri $API_URL -Headers $headers -UseBasicParsing -TimeoutSec 10
+            }
+            Write-Output ("API test status: {0}" -f $response.StatusCode)
+            $snippet = ($response.Content -replace "`r?`n"," ") 
+            if ($snippet.Length -gt 200) { $snippet = $snippet.Substring(0,200) }
+            Write-Output ("Response snippet: {0}" -f $snippet)
+            if ($response.StatusCode -eq 401 -or $response.StatusCode -eq 403) {
+              Write-Error "Token appears invalid or expired (401/403)."
+              exit 2
+            } elseif ($response.StatusCode -ge 400) {
+              Write-Error ("API returned error status {0}" -f $response.StatusCode)
+              exit 3
+            } else {
+              Write-Output "API test succeeded (token accepted)."
+            }
+          } catch {
+            $err = $_.Exception
+            Write-Error ("API test request failed: {0}" -f $err.Message)
+            exit 4
+          }
 
       - name: Hide sensitive files
         shell: powershell
