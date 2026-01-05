@@ -1,4 +1,4 @@
-name: NodepayBot Matrix Run (JSON tokens, newline proxies)
+name: NodepayBot Matrix Run (single token, per-instance proxies)
 
 on:
   workflow_dispatch:
@@ -8,12 +8,14 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        # Default: 3 instances. Change to [0,1,2,3] for 4 or [0,1,2,3,4] for 5
+        # Default: 3 instances. Change to [0,1,2,3] for 4 instances
         instance_index: [0, 1, 2]
       fail-fast: false
 
     env:
-      NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
+      # Single token used by all instances
+      NODEPAY_TOKEN: ${{ secrets.NODEPAY_TOKEN }}
+      # Proxies can be provided as newline-separated text or a JSON array in this secret
       NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
       INSTANCE_INDEX: ${{ matrix.instance_index }}
       USE_PROXY: 'no'
@@ -27,45 +29,54 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install requirements (if present)
+      - name: Install requirements (if present) and HTTP libs
         shell: powershell
         run: |
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install requests aiohttp aiohttp-socks --no-input
 
-      - name: Select token and proxy (tokens JSON, proxies newline)
+      - name: Validate single NODEPAY_TOKEN (masked) and write tokens.txt
         shell: powershell
         env:
-          NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
+          NODEPAY_TOKEN: ${{ secrets.NODEPAY_TOKEN }}
+        run: |
+          if (-not $env:NODEPAY_TOKEN) {
+            Write-Error "NODEPAY_TOKEN secret is empty. Set the secret and retry."
+            exit 1
+          }
+          $token = $env:NODEPAY_TOKEN.Trim()
+          if (-not $token) {
+            Write-Error "NODEPAY_TOKEN is empty after trimming."
+            exit 1
+          }
+          # Masked diagnostics
+          $len = $token.Length
+          $start = $token.Substring(0,[Math]::Min(6,$len))
+          $end = $token.Substring([Math]::Max(0,$len-6))
+          Write-Output "NODEPAY token length: $len"
+          Write-Output "NODEPAY token sample: $start...$end"
+          # Write exact bytes to tokens.txt (no newline)
+          Set-Content -Path tokens.txt -Value $token -NoNewline -Encoding UTF8
+
+      - name: Confirm tokens.txt on disk (masked)
+        shell: powershell
+        run: |
+          if (-not (Test-Path tokens.txt)) { Write-Error "tokens.txt not found"; exit 1 }
+          $t = Get-Content tokens.txt -Raw
+          $len = $t.Length
+          $start = $t.Substring(0,[Math]::Min(6,$len))
+          $end = $t.Substring([Math]::Max(0,$len-6))
+          Write-Output "tokens.txt length: $len"
+          Write-Output "tokens.txt sample: $start...$end"
+
+      - name: Parse proxies secret and select proxy for this instance
+        shell: powershell
+        env:
           NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
           INSTANCE_INDEX: ${{ matrix.instance_index }}
         run: |
-          $idx = [int]$env:INSTANCE_INDEX
-
-          # Read raw secrets
-          $rawTokens = $env:NODEPAY_TOKENS_JSON
-          $rawProxies = $env:NODEPAY_PROXIES_RAW
-
-          if (-not $rawTokens) {
-            Write-Error "NODEPAY_TOKENS_JSON is empty. Provide a JSON array of tokens or a single token string."
-            exit 1
-          }
-
-          # Parse tokens: try JSON array first, else treat as single token string
-          try {
-            $parsed = ConvertFrom-Json -InputObject $rawTokens
-            if ($parsed -is [System.Array]) {
-              $tokens = $parsed
-            } else {
-              # ConvertFrom-Json returned a single value (not an array)
-              $tokens = @($parsed.ToString())
-            }
-          } catch {
-            # Not JSON: treat raw as single token string
-            $tokens = @($rawTokens.Trim())
-          }
-
-          # Parse proxies as newline-separated list (fallback to JSON array if provided)
+          $raw = $env:NODEPAY_PROXIES_RAW
           function Parse-Proxies($raw) {
             if (-not $raw) { return @() }
             try {
@@ -74,30 +85,78 @@ jobs:
             } catch { }
             return ($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
           }
-
-          $proxies = Parse-Proxies $rawProxies
-
-          # Select by index (empty string if out of range)
-          $selectedToken = ""
-          if ($idx -lt $tokens.Count) { $selectedToken = $tokens[$idx] }
-
+          $proxies = Parse-Proxies $raw
+          $idx = [int]$env:INSTANCE_INDEX
           $selectedProxy = ""
-          if ($idx -lt $proxies.Count) { $selectedProxy = $proxies[$idx] }
-
-          # Sanity checks
-          if (-not $selectedToken) {
-            Write-Error "No token selected for instance index $idx. Check NODEPAY_TOKENS_JSON and matrix.instance_index."
-            exit 1
+          if ($proxies.Count -gt 0 -and $idx -lt $proxies.Count) {
+            $selectedProxy = $proxies[$idx]
+          } else {
+            $selectedProxy = ""
+          }
+          # Write selected proxy to proxies.txt (no newline)
+          Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
+          # Masked diagnostics
+          if ($selectedProxy) {
+            $len = $selectedProxy.Length
+            $start = $selectedProxy.Substring(0,[Math]::Min(6,$len))
+            $end = $selectedProxy.Substring([Math]::Max(0,$len-6))
+            Write-Output ("Selected proxy for index {0}: length={1} sample={2}...{3}" -f $idx, $len, $start, $end)
+          } else {
+            Write-Output ("No proxy selected for index {0} (proxies list shorter than index or no proxies provided)" -f $idx)
           }
 
-          # Write selected token and proxy to files without printing them
-          # Use Set-Content -NoNewline to avoid adding extra newline characters
-          Set-Content -Path tokens.txt -Value $selectedToken -NoNewline -Encoding UTF8
-          Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
+      - name: Confirm proxies.txt (masked)
+        shell: powershell
+        run: |
+          if (-not (Test-Path proxies.txt)) { Write-Output "proxies.txt not present (no proxy for this instance)"; exit 0 }
+          $p = Get-Content proxies.txt -Raw
+          $p = $p.Trim()
+          if (-not $p) { Write-Output "proxies.txt is empty"; exit 0 }
+          $len = $p.Length
+          $start = $p.Substring(0,[Math]::Min(6,$len))
+          $end = $p.Substring([Math]::Max(0,$len-6))
+          Write-Output ("proxies.txt length: {0}" -f $len)
+          Write-Output ("proxies.txt sample: {0}...{1}" -f $start, $end)
 
-          # Export selected values to subsequent steps (masked)
-          Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED=$selectedToken"
-          Add-Content -Path $env:GITHUB_ENV -Value "PROXY_SELECTED=$selectedProxy"
+      - name: API test using token (masked) to verify validity
+        shell: powershell
+        run: |
+          python - <<'PY'
+import os, sys, requests, json
+token = ""
+try:
+    with open("tokens.txt","r",encoding="utf-8") as f:
+        token = f.read().strip()
+except Exception as e:
+    print("FAILED: cannot read tokens.txt:", e)
+    sys.exit(1)
+if not token:
+    print("FAILED: token empty")
+    sys.exit(1)
+# Masked print
+print("Token length:", len(token))
+print("Token sample:", token[:6] + "..." + token[-6:])
+# Replace the URL below with a NodePay endpoint your bot uses for a quick validation
+API_URL = "https://api.nodepay.ai/v1/profile"
+headers = {"Authorization": f"Bearer {token}"}
+try:
+    r = requests.get(API_URL, headers=headers, timeout=10)
+    print("API test status:", r.status_code)
+    # Print a short snippet of the response for debugging (masked)
+    text = r.text or ""
+    print("Response snippet:", text[:200].replace("\n"," "))
+    if r.status_code == 401 or r.status_code == 403:
+        print("Token appears invalid or expired (401/403).")
+        sys.exit(2)
+    elif r.status_code >= 400:
+        print("API returned error status", r.status_code)
+        sys.exit(3)
+    else:
+        print("API test succeeded (token accepted).")
+except Exception as e:
+    print("API test request failed:", type(e).__name__, e)
+    sys.exit(4)
+PY
 
       - name: Hide sensitive files
         shell: powershell
@@ -116,16 +175,22 @@ jobs:
           if exist input.txt del /f /q input.txt
           for /L %%i in (1,1,200) do @echo yes>> input.txt
 
-          REM Set environment variables for the batch if it reads them
-          set PROXY=%PROXY%
-          set TOKEN=%TOKEN%
-          set USE_PROXY=%USE_PROXY%
+          REM Ensure environment variables the batch may read are set from files
+          setlocal enabledelayedexpansion
+          if exist tokens.txt (
+            for /f "usebackq delims=" %%T in ("tokens.txt") do set "TOKEN=%%T"
+          )
+          if exist proxies.txt (
+            for /f "usebackq delims=" %%P in ("proxies.txt") do set "PROXY=%%P"
+          )
+          set "USE_PROXY=%USE_PROXY%"
 
           REM Run the batch file using redirected stdin
           cmd /c "run.bat < input.txt"
 
           REM Remove the temporary input file
           del /f /q input.txt
+          endlocal
 
       - name: Cleanup sensitive files
         if: always()
