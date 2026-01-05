@@ -1,19 +1,25 @@
-name: NodepayBot CI (Windows) — safe token & proxy handling
+name: NodepayBot Matrix Run (JSON tokens, newline proxies)
 
 on:
   workflow_dispatch:
 
 jobs:
-  validate-and-run:
-    runs-on: [self-hosted, windows]
+  run-instances:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        # Default: 3 instances. Change to [0,1,2,3] for 4 or [0,1,2,3,4] for 5
+        instance_index: [0, 1, 2]
+      fail-fast: false
+
     env:
-      # Secrets (set these in your repo settings)
       NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
       NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
-      INSTANCE_COUNT: 3
-    steps:
+      INSTANCE_INDEX: ${{ matrix.instance_index }}
+      USE_PROXY: 'no'
 
-      - name: Checkout
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -21,77 +27,47 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install requirements (if present)
         shell: powershell
         run: |
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          # optional socks support
-          pip install aiohttp aiohttp-socks --no-input
 
-      - name: Validate NODEPAY token secret (masked) and write tokens.txt
+      - name: Select token and proxy (tokens JSON, proxies newline)
         shell: powershell
         env:
           NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
+          NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
+          INSTANCE_INDEX: ${{ matrix.instance_index }}
         run: |
-          if (-not $env:NODEPAY_TOKENS_JSON) {
-            Write-Error "NODEPAY_TOKENS_JSON secret is empty. Set the secret and retry."
+          $idx = [int]$env:INSTANCE_INDEX
+
+          # Read raw secrets
+          $rawTokens = $env:NODEPAY_TOKENS_JSON
+          $rawProxies = $env:NODEPAY_PROXIES_RAW
+
+          if (-not $rawTokens) {
+            Write-Error "NODEPAY_TOKENS_JSON is empty. Provide a JSON array of tokens or a single token string."
             exit 1
           }
 
-          # Try parse as JSON array; fallback to raw string
+          # Parse tokens: try JSON array first, else treat as single token string
           try {
-            $arr = ConvertFrom-Json -InputObject $env:NODEPAY_TOKENS_JSON
-            if ($arr -is [System.Array]) {
-              $token = $arr[0]
+            $parsed = ConvertFrom-Json -InputObject $rawTokens
+            if ($parsed -is [System.Array]) {
+              $tokens = $parsed
             } else {
-              # If ConvertFrom-Json returned a single value, use it
-              $token = $arr
+              # ConvertFrom-Json returned a single value (not an array)
+              $tokens = @($parsed.ToString())
             }
           } catch {
-            $token = $env:NODEPAY_TOKENS_JSON.Trim()
+            # Not JSON: treat raw as single token string
+            $tokens = @($rawTokens.Trim())
           }
 
-          if (-not $token) {
-            Write-Error "Token is empty after parsing. Check the secret format."
-            exit 1
-          }
-
-          # Masked diagnostics (do not print full token)
-          $len = $token.Length
-          $start = $token.Substring(0,[Math]::Min(6,$len))
-          $end = $token.Substring([Math]::Max(0,$len-6))
-          Write-Output "NODEPAY token length: $len"
-          Write-Output "NODEPAY token sample: $start...$end"
-
-          # Write exact bytes to tokens.txt (no newline)
-          Set-Content -Path tokens.txt -Value $token -NoNewline -Encoding UTF8
-
-      - name: Confirm tokens.txt on disk (masked)
-        shell: powershell
-        run: |
-          if (-not (Test-Path tokens.txt)) { Write-Error "tokens.txt not found"; exit 1 }
-          $t = Get-Content tokens.txt -Raw
-          $len = $t.Length
-          $start = $t.Substring(0,[Math]::Min(6,$len))
-          $end = $t.Substring([Math]::Max(0,$len-6))
-          Write-Output "tokens.txt length: $len"
-          Write-Output "tokens.txt sample: $start...$end"
-
-      - name: Parse proxies secret and write proxies.txt
-        shell: powershell
-        env:
-          NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
-        run: |
-          # Accept either JSON array or newline-separated raw proxies
-          $raw = $env:NODEPAY_PROXIES_RAW
-          if (-not $raw) {
-            Write-Output "No proxies secret provided; proxies.txt will be empty"
-            if (Test-Path proxies.txt) { Remove-Item proxies.txt -Force }
-            exit 0
-          }
-
+          # Parse proxies as newline-separated list (fallback to JSON array if provided)
           function Parse-Proxies($raw) {
+            if (-not $raw) { return @() }
             try {
               $p = ConvertFrom-Json -InputObject $raw
               if ($p -is [System.Array]) { return ,$p }
@@ -99,88 +75,61 @@ jobs:
             return ($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
           }
 
-          $proxies = Parse-Proxies $raw
-          if (-not $proxies -or $proxies.Count -eq 0) {
-            Write-Output "No proxies parsed from secret; proxies.txt will be empty"
-            if (Test-Path proxies.txt) { Remove-Item proxies.txt -Force }
-            exit 0
+          $proxies = Parse-Proxies $rawProxies
+
+          # Select by index (empty string if out of range)
+          $selectedToken = ""
+          if ($idx -lt $tokens.Count) { $selectedToken = $tokens[$idx] }
+
+          $selectedProxy = ""
+          if ($idx -lt $proxies.Count) { $selectedProxy = $proxies[$idx] }
+
+          # Sanity checks
+          if (-not $selectedToken) {
+            Write-Error "No token selected for instance index $idx. Check NODEPAY_TOKENS_JSON and matrix.instance_index."
+            exit 1
           }
 
-          # Write first N proxies (or all) to proxies.txt, one per line
-          $proxies | Set-Content -Path proxies.txt -Encoding UTF8
+          # Write selected token and proxy to files without printing them
+          # Use Set-Content -NoNewline to avoid adding extra newline characters
+          Set-Content -Path tokens.txt -Value $selectedToken -NoNewline -Encoding UTF8
+          Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
 
-          # Masked sample
-          $first = $proxies[0]
-          $len = $first.Length
-          $start = $first.Substring(0,[Math]::Min(6,$len))
-          $end = $first.Substring([Math]::Max(0,$len-6))
-          Write-Output ("Wrote {0} proxies to proxies.txt" -f $proxies.Count)
-          Write-Output ("First proxy sample: {0}...{1}" -f $start, $end)
+          # Export selected values to subsequent steps (masked)
+          Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED=$selectedToken"
+          Add-Content -Path $env:GITHUB_ENV -Value "PROXY_SELECTED=$selectedProxy"
 
-      - name: Confirm proxies.txt (masked)
+      - name: Hide sensitive files
         shell: powershell
         run: |
-          if (-not (Test-Path proxies.txt)) { Write-Output "proxies.txt not present (no proxies configured)"; exit 0 }
-          $p = Get-Content proxies.txt -Raw
-          $p = $p.Trim()
-          if (-not $p) { Write-Output "proxies.txt is empty"; exit 0 }
-          $lines = $p -split "`r?`n"
-          Write-Output ("proxies.txt lines: {0}" -f $lines.Count)
-          $first = $lines[0]
-          $len = $first.Length
-          $start = $first.Substring(0,[Math]::Min(6,$len))
-          $end = $first.Substring([Math]::Max(0,$len-6))
-          Write-Output ("First proxy sample: {0}...{1}" -f $start, $end)
+          if (Test-Path tokens.txt) { attrib +h tokens.txt }
+          if (Test-Path proxies.txt) { attrib +h proxies.txt }
 
-      - name: Run proxy connectivity test from runner (same logic as app)
-        shell: powershell
-        run: |
-          python - <<'PY'
-import asyncio, ssl, traceback, sys
-from urllib.parse import urlparse, urlunparse
-from aiohttp import BasicAuth, ClientSession
-
-def read_proxies():
-    try:
-        with open('proxies.txt','r',encoding='utf-8') as f:
-            return [l.strip() for l in f.read().splitlines() if l.strip()]
-    except:
-        return []
-
-proxies = read_proxies()
-async def test(proxy):
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-    try:
-        p = urlparse(proxy)
-        proxy_to_use = urlunparse((p.scheme, f"{p.hostname}:{p.port}", "", "", "", ""))
-        proxy_auth = BasicAuth(p.username or "", p.password or "") if (p.username or p.password) else None
-        print(f"Testing {p.hostname}:{p.port} ...")
-        async with ClientSession() as session:
-            async with session.get("https://api.ipify.org?format=json", proxy=proxy_to_use, proxy_auth=proxy_auth, ssl=ssl_ctx, timeout=10) as r:
-                print(f"OK {p.hostname}:{p.port} -> {r.status} {await r.text()}")
-    except Exception as e:
-        print(f"FAILED {proxy[:60]} -> {type(e).__name__}: {e}")
-        traceback.print_exc()
-
-async def main():
-    if not proxies:
-        print("No proxies to test")
-        return
-    await asyncio.gather(*(test(p) for p in proxies))
-
-if __name__ == '__main__':
-    asyncio.run(main())
-PY
-
-      - name: Start bot (run main.py) and write logs per instance
-        shell: powershell
+      - name: Run bot with automated confirmation fallback
+        shell: cmd
         env:
-          INSTANCE_COUNT: ${{ env.INSTANCE_COUNT }}
+          PROXY: ${{ env.PROXY_SELECTED }}
+          TOKEN: ${{ env.TOKEN_SELECTED }}
+          USE_PROXY: ${{ env.USE_PROXY }}
         run: |
-          New-Item -ItemType Directory -Force -Path logs | Out-Null
-          # Run the Python app directly. If your app accepts INSTANCE_COUNT or INSTANCE_INDEX,
-          # adapt the command below. This runs the app in the foreground and writes logs.
-          Write-Output "Starting bot (foreground). Logs will be in logs\bot.log"
-          python main.py > logs\bot.log 2>&1
+          REM Create an input file with many 'yes' responses (change to 'y' if needed)
+          if exist input.txt del /f /q input.txt
+          for /L %%i in (1,1,200) do @echo yes>> input.txt
+
+          REM Set environment variables for the batch if it reads them
+          set PROXY=%PROXY%
+          set TOKEN=%TOKEN%
+          set USE_PROXY=%USE_PROXY%
+
+          REM Run the batch file using redirected stdin
+          cmd /c "run.bat < input.txt"
+
+          REM Remove the temporary input file
+          del /f /q input.txt
+
+      - name: Cleanup sensitive files
+        if: always()
+        shell: powershell
+        run: |
+          Remove-Item -Path tokens.txt -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path proxies.txt -Force -ErrorAction SilentlyContinue
