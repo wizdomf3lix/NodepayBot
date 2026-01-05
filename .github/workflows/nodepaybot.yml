@@ -11,7 +11,7 @@ jobs:
     env:
       NODEPAY_TOKENS: ${{ secrets.NODEPAY_TOKENS }}
       NODEPAY_PROXIES: ${{ secrets.NODEPAY_PROXIES }}
-      USE_PROXY: 'no'                # set to 'yes' or 'no' for non-interactive runs
+      USE_PROXY: 'yes'                # set to 'yes' or 'no' for non-interactive runs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
