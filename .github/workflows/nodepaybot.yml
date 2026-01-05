@@ -1,4 +1,4 @@
-name: NodepayBot Matrix Run (JSON tokens/proxies)
+name: NodepayBot Matrix Run (JSON tokens, newline proxies)
 
 on:
   workflow_dispatch:
@@ -16,9 +16,9 @@ jobs:
 
     env:
       NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
-      NODEPAY_PROXIES_JSON: ${{ secrets.NODEPAY_PROXIES_JSON }}
+      NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
       INSTANCE_INDEX: ${{ matrix.instance_index }}
-      USE_PROXY: 'yes'   # optional: used if your code reads USE_PROXY
+      USE_PROXY: 'yes'
 
     steps:
       - name: Checkout repository
@@ -35,37 +35,41 @@ jobs:
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
-      - name: Select token and proxy from JSON secrets and write files
+      - name: Select token and proxy (tokens JSON, proxies newline)
         shell: powershell
         run: |
-          # Do not echo secrets. Parse JSON and select by index.
           $idx = [int]$env:INSTANCE_INDEX
 
-          # Parse tokens JSON secret
-          if ($env:NODEPAY_TOKENS_JSON) {
-            try {
-              $tokens = ConvertFrom-Json -InputObject $env:NODEPAY_TOKENS_JSON
-            } catch {
-              Write-Error "Failed to parse NODEPAY_TOKENS_JSON. Ensure it's valid JSON array."
-              exit 1
-            }
-          } else {
-            $tokens = @()
+          # Read raw secrets
+          $rawTokens = $env:NODEPAY_TOKENS_JSON
+          $rawProxies = $env:NODEPAY_PROXIES_RAW
+
+          if (-not $rawTokens) {
+            Write-Error "NODEPAY_TOKENS_JSON is empty. Provide a JSON array of tokens."
+            exit 1
           }
 
-          # Parse proxies JSON secret (optional)
-          if ($env:NODEPAY_PROXIES_JSON) {
-            try {
-              $proxies = ConvertFrom-Json -InputObject $env:NODEPAY_PROXIES_JSON
-            } catch {
-              Write-Error "Failed to parse NODEPAY_PROXIES_JSON. Ensure it's valid JSON array."
-              exit 1
-            }
-          } else {
-            $proxies = @()
+          # Parse tokens as JSON array (fail if invalid)
+          try {
+            $tokens = ConvertFrom-Json -InputObject $rawTokens
+          } catch {
+            Write-Error "Failed to parse NODEPAY_TOKENS_JSON. Ensure it's a valid JSON array (e.g. [\"token1\",\"token2\"])."
+            exit 1
           }
 
-          # Select token and proxy safely (empty string if out of range)
+          # Parse proxies as newline-separated list (fallback to JSON if provided)
+          function Parse-Proxies($raw) {
+            if (-not $raw) { return @() }
+            try {
+              $p = ConvertFrom-Json -InputObject $raw
+              if ($p -is [System.Array]) { return ,$p }
+            } catch { }
+            return ($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+          }
+
+          $proxies = Parse-Proxies $rawProxies
+
+          # Select by index (empty string if out of range)
           $selectedToken = ""
           if ($idx -lt $tokens.Count) { $selectedToken = $tokens[$idx] }
 
@@ -76,7 +80,7 @@ jobs:
           Set-Content -Path tokens.txt -Value $selectedToken -NoNewline -Encoding UTF8
           Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
 
-          # Export selected values to subsequent steps (masked in logs)
+          # Export selected values to subsequent steps (masked)
           echo "TOKEN_SELECTED=$selectedToken" >> $env:GITHUB_ENV
           echo "PROXY_SELECTED=$selectedProxy" >> $env:GITHUB_ENV
 
@@ -89,12 +93,14 @@ jobs:
       - name: Run bot with automated confirmation fallback
         shell: cmd
         run: |
-          REM Create an input file with many 'yes' responses (adjust to 'y' if needed)
+          REM Create an input file with many 'yes' responses (change to 'y' if needed)
+          if exist input.txt del /f /q input.txt
           for /L %%i in (1,1,200) do @echo yes>> input.txt
 
           REM Set environment variables for the batch if it reads them
           set PROXY=%PROXY_SELECTED%
           set TOKEN=%TOKEN_SELECTED%
+          set USE_PROXY=%USE_PROXY%
 
           REM Run the batch file using redirected stdin
           cmd /c "run.bat < input.txt"
