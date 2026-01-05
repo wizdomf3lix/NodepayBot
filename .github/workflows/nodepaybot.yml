@@ -8,11 +8,14 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
+        # Default: 3 instances. Change to [0,1,2,3] for 4 instances
         instance_index: [0, 1, 2]
       fail-fast: false
 
     env:
+      # Single token used by all instances (set this secret in repo settings)
       NODEPAY_TOKEN: ${{ secrets.NODEPAY_TOKEN }}
+      # Proxies can be provided as newline-separated text or a JSON array in this secret
       NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
       INSTANCE_INDEX: ${{ matrix.instance_index }}
       USE_PROXY: 'no'
@@ -47,13 +50,17 @@ jobs:
             Write-Error "NODEPAY_TOKEN is empty after trimming."
             exit 1
           }
+          # Masked diagnostics
           $len = $token.Length
           $start = $token.Substring(0,[Math]::Min(6,$len))
           $end = $token.Substring([Math]::Max(0,$len-6))
           Write-Output "NODEPAY token length: $len"
           Write-Output "NODEPAY token sample: $start...$end"
+          # Write exact bytes to tokens.txt (no newline)
           Set-Content -Path tokens.txt -Value $token -NoNewline -Encoding UTF8
+          # Export masked selection for later steps (not the full token)
           Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED_MASK=${start}...${end}"
+          # Also export a flag so steps can know token exists
           Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED_PRESENT=true"
 
       - name: Confirm tokens.txt on disk (masked)
@@ -90,10 +97,13 @@ jobs:
           } else {
             $selectedProxy = ""
           }
+          # Write selected proxy to proxies.txt (no newline)
           Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
+          # Export masked and presence flags to GITHUB_ENV
           $mask = if ($selectedProxy) { $selectedProxy.Substring(0,[Math]::Min(6,$selectedProxy.Length)) + "..." + $selectedProxy.Substring([Math]::Max(0,$selectedProxy.Length-6)) } else { "none" }
           Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_MASK=" + $mask)
           Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_PRESENT=" + ([bool]($selectedProxy -ne "")))
+          # Export actual proxy for ephemeral use in this job (be cautious)
           Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED=" + $selectedProxy)
 
       - name: Confirm proxies.txt (masked)
@@ -110,10 +120,11 @@ jobs:
           Write-Output ("proxies.txt sample: {0}...{1}" -f $start, $end)
 
       - name: API test using token (masked) to verify validity
-        shell: bash
+        shell: powershell
         run: |
-          python - <<'PY'
+          $py = @'
 import os, sys, requests
+# Read token from file
 try:
     with open("tokens.txt","r",encoding="utf-8") as f:
         token = f.read().strip()
@@ -125,6 +136,7 @@ if not token:
     sys.exit(1)
 print("Token length:", len(token))
 print("Token sample:", token[:6] + "..." + token[-6:])
+# Replace the URL below with a NodePay endpoint your bot uses for a quick validation
 API_URL = "https://api.nodepay.ai/v1/profile"
 headers = {"Authorization": f"Bearer {token}"}
 try:
@@ -143,7 +155,10 @@ try:
 except Exception as e:
     print("API test request failed:", type(e).__name__, e)
     sys.exit(4)
-PY
+'@
+          Set-Content -Path api_test.py -Value $py -Encoding UTF8
+          python api_test.py
+          Remove-Item -Path api_test.py -Force
 
       - name: Hide sensitive files
         shell: powershell
@@ -154,10 +169,14 @@ PY
       - name: Run bot with automated confirmation fallback
         shell: cmd
         env:
+          # Provide USE_PROXY flag; actual TOKEN/PROXY are read from files at runtime
           USE_PROXY: ${{ env.USE_PROXY }}
         run: |
+          REM Create an input file with many 'yes' responses (change to 'y' if needed)
           if exist input.txt del /f /q input.txt
           for /L %%i in (1,1,200) do @echo yes>> input.txt
+
+          REM Ensure environment variables the batch may read are set from files
           setlocal enabledelayedexpansion
           if exist tokens.txt (
             for /f "usebackq delims=" %%T in ("tokens.txt") do set "TOKEN=%%T"
@@ -166,7 +185,11 @@ PY
             for /f "usebackq delims=" %%P in ("proxies.txt") do set "PROXY=%%P"
           )
           set "USE_PROXY=%USE_PROXY%"
+
+          REM Run the batch file using redirected stdin
           cmd /c "run.bat < input.txt"
+
+          REM Remove the temporary input file
           del /f /q input.txt
           endlocal
 
