@@ -138,7 +138,7 @@ print("Token length:", len(token))
 print("Token sample:", token[:6] + "..." + token[-6:])
 # Replace the URL below with a NodePay endpoint your bot uses for a quick validation
 API_URL = "https://api.nodepay.ai/v1/profile"
-headers = {"Authorization": f"Bearer {token}"}
+headers = {"Authorization": "Bearer " + token}
 try:
     r = requests.get(API_URL, headers=headers, timeout=10)
     print("API test status:", r.status_code)
