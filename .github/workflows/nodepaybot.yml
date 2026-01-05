@@ -2,7 +2,8 @@ name: NodepayBot Auto Run
 
 on:
   workflow_dispatch:
-  
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
   run-nodepaybot:
@@ -10,9 +11,9 @@ jobs:
     env:
       NODEPAY_TOKENS: ${{ secrets.NODEPAY_TOKENS }}
       NODEPAY_PROXIES: ${{ secrets.NODEPAY_PROXIES }}
-      USE_PROXY: 'yes'
+      USE_PROXY: 'yes'                # set to 'yes' or 'no' for non-interactive runs
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -21,24 +22,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install requirements
-        shell: powershell
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install -r requirements.txt
 
       - name: Create tokens and proxies files from secrets
         shell: powershell
         run: |
-          if ($env:NODEPAY_TOKENS) {
-            Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline -Encoding ASCII
-          } else {
-            New-Item -Path tokens.txt -ItemType File -Force | Out-Null
-          }
-          if ($env:NODEPAY_PROXIES) {
-            Set-Content -Path proxies.txt -Value $env:NODEPAY_PROXIES -NoNewline -Encoding ASCII
-          } else {
-            New-Item -Path proxies.txt -ItemType File -Force | Out-Null
-          }
+          Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline
+          Set-Content -Path proxies.txt -Value $env:NODEPAY_PROXIES -NoNewline
 
       - name: Hide sensitive files
         shell: powershell
@@ -46,15 +38,11 @@ jobs:
           attrib +h tokens.txt
           attrib +h proxies.txt
 
-      - name: Run bot with automated confirmation fallback
-        shell: cmd
+      - name: Run bot (non-interactive via USE_PROXY)
+        shell: powershell
         run: |
-          REM Create an input file with many 'yes' responses (ASCII)
-          for /L %%i in (1,1,200) do @echo no>> input.txt
-          REM Run the batch file using redirected stdin
-          cmd /c "run.bat < input.txt"
-          REM Remove the temporary input file
-          del /f /q input.txt
+          # If you patched the code to read USE_PROXY, no stdin piping is needed
+          .\run.bat
 
       - name: Cleanup sensitive files
         if: always()
