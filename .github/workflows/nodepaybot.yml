@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
 
     env:
-      # Single token used by all instances
+      # Single token used by all instances (set this secret in repo settings)
       NODEPAY_TOKEN: ${{ secrets.NODEPAY_TOKEN }}
       # Proxies can be provided as newline-separated text or a JSON array in this secret
       NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
@@ -58,6 +58,10 @@ jobs:
           Write-Output "NODEPAY token sample: $start...$end"
           # Write exact bytes to tokens.txt (no newline)
           Set-Content -Path tokens.txt -Value $token -NoNewline -Encoding UTF8
+          # Export masked selection for later steps (not the full token)
+          Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED_MASK=${start}...${end}"
+          # Also export a flag so steps can know token exists
+          Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED_PRESENT=true"
 
       - name: Confirm tokens.txt on disk (masked)
         shell: powershell
@@ -95,15 +99,11 @@ jobs:
           }
           # Write selected proxy to proxies.txt (no newline)
           Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
-          # Masked diagnostics
-          if ($selectedProxy) {
-            $len = $selectedProxy.Length
-            $start = $selectedProxy.Substring(0,[Math]::Min(6,$len))
-            $end = $selectedProxy.Substring([Math]::Max(0,$len-6))
-            Write-Output ("Selected proxy for index {0}: length={1} sample={2}...{3}" -f $idx, $len, $start, $end)
-          } else {
-            Write-Output ("No proxy selected for index {0} (proxies list shorter than index or no proxies provided)" -f $idx)
-          }
+          # Export selected values to GITHUB_ENV for later steps (do NOT export full token)
+          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_MASK=" + (if ($selectedProxy) { $selectedProxy.Substring(0,[Math]::Min(6,$selectedProxy.Length)) + "..." + $selectedProxy.Substring([Math]::Max(0,$selectedProxy.Length-6)) } else { "none" }))
+          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_PRESENT=" + ([bool]($selectedProxy -ne "")))
+          # Also export the actual proxy for steps that need it (careful: this writes secret-like data into job env; it's ephemeral)
+          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED=" + $selectedProxy)
 
       - name: Confirm proxies.txt (masked)
         shell: powershell
@@ -122,8 +122,8 @@ jobs:
         shell: powershell
         run: |
           python - <<'PY'
-import os, sys, requests, json
-token = ""
+import os, sys, requests
+# Read token from file
 try:
     with open("tokens.txt","r",encoding="utf-8") as f:
         token = f.read().strip()
@@ -133,7 +133,6 @@ except Exception as e:
 if not token:
     print("FAILED: token empty")
     sys.exit(1)
-# Masked print
 print("Token length:", len(token))
 print("Token sample:", token[:6] + "..." + token[-6:])
 # Replace the URL below with a NodePay endpoint your bot uses for a quick validation
@@ -142,10 +141,9 @@ headers = {"Authorization": f"Bearer {token}"}
 try:
     r = requests.get(API_URL, headers=headers, timeout=10)
     print("API test status:", r.status_code)
-    # Print a short snippet of the response for debugging (masked)
-    text = r.text or ""
-    print("Response snippet:", text[:200].replace("\n"," "))
-    if r.status_code == 401 or r.status_code == 403:
+    text = (r.text or "")[:200].replace("\n"," ")
+    print("Response snippet:", text)
+    if r.status_code in (401,403):
         print("Token appears invalid or expired (401/403).")
         sys.exit(2)
     elif r.status_code >= 400:
@@ -167,8 +165,7 @@ PY
       - name: Run bot with automated confirmation fallback
         shell: cmd
         env:
-          PROXY: ${{ env.PROXY_SELECTED }}
-          TOKEN: ${{ env.TOKEN_SELECTED }}
+          # Provide the actual proxy and token to the batch by reading files at runtime
           USE_PROXY: ${{ env.USE_PROXY }}
         run: |
           REM Create an input file with many 'yes' responses (change to 'y' if needed)
