@@ -1,7 +1,7 @@
 name: NodepayBot Matrix Run (single token, per-instance proxies)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:    # Manual trigger
 
 jobs:
   run-instances:
