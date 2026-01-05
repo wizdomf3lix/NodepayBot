@@ -1,40 +1,60 @@
 import os
 import sys
 import ssl
+import json
+import asyncio
+from typing import List, Tuple, Optional, Any
+from urllib.parse import urlparse, urlunparse
 import aiohttp
 
-from typing import List, Tuple, Optional
-from urllib.parse import urlparse
 from utils.settings import logger, Fore
 
+# Optional socks support (install aiohttp_socks if you need socks proxies)
+try:
+    from aiohttp_socks import ProxyConnector  # type: ignore
+    _HAS_AIOHTTP_SOCKS = True
+except Exception:
+    _HAS_AIOHTTP_SOCKS = False
 
 PROXIES_FILE = "proxies.txt"
+TOKENS_FILE = "tokens.txt"
 
 
-def load_proxies() -> List[str]:
+def _mask_proxy(proxy: str) -> str:
+    """Return a masked version of a proxy for safe logging."""
+    try:
+        p = urlparse(proxy)
+        host = p.hostname or "unknown"
+        port = p.port or ""
+        user = p.username or ""
+        if user:
+            return f"{user[:1]}***@{host}:{port}"
+        return f"{host}:{port}"
+    except Exception:
+        return "masked-proxy"
+
+
+def load_proxies(path: str = PROXIES_FILE) -> List[str]:
     """
-    Load proxies from PROXIES_FILE. Returns a list of proxy strings.
-    Logs warnings/errors but never prints secrets.
+    Load proxies from a file. Each non-empty line is a proxy string.
+    Strips surrounding quotes and whitespace.
     """
     try:
-        with open(PROXIES_FILE, "r", encoding="utf-8") as f:
-            proxies = [line.strip() for line in f.read().splitlines() if line.strip()]
-
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.read().splitlines()]
+        proxies = [ln.strip('"').strip("'") for ln in lines if ln and not ln.isspace()]
         if not proxies:
-            logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}No proxies found in {PROXIES_FILE}. Running without proxies{Fore.RESET}")
-
+            logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}No proxies found in {path}. Running without proxies{Fore.RESET}")
         return proxies
-
     except FileNotFoundError:
-        logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}File {PROXIES_FILE} not found. Running without proxies{Fore.RESET}")
+        logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}File {path} not found. Running without proxies{Fore.RESET}")
         return []
-
     except Exception as e:
         logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}Error loading proxies:{Fore.RESET} {e}")
         return []
 
 
-def _env_choice_to_bool(value: str) -> Optional[bool]:
+def _env_choice_to_bool(value: Optional[str]) -> Optional[bool]:
     if value is None:
         return None
     v = value.strip().lower()
@@ -49,34 +69,25 @@ def get_proxy_choice() -> List[str]:
     """
     Determine whether to use proxies and return the list of proxies to use.
     Priority:
-      1. Environment variable USE_PROXY (yes/no, y/n, true/false, 1/0)
+      1. Environment variable USE_PROXY (yes/no)
       2. Command-line flags --use-proxy / --no-proxy
-      3. Interactive prompt fallback (only when a TTY is available)
-      4. Non-interactive default: do not use proxies
+      3. Interactive prompt (if TTY)
+      4. Default: no proxies
     """
-    # 1) Environment variable
-    env_val = os.getenv("USE_PROXY")
-    env_bool = _env_choice_to_bool(env_val)
-    if env_bool is True:
-        proxies = load_proxies()
-        if not proxies:
-            logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}No proxies found in {PROXIES_FILE}. Please add valid proxies{Fore.RESET}")
-            return []
-        return proxies
-    if env_bool is False:
+    # 1) Env var
+    env_choice = _env_choice_to_bool(os.getenv("USE_PROXY"))
+    if env_choice is True:
+        return load_proxies()
+    if env_choice is False:
         return []
 
-    # 2) Command-line flags
+    # 2) CLI flags
     if "--use-proxy" in sys.argv:
-        proxies = load_proxies()
-        if not proxies:
-            logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}No proxies found in {PROXIES_FILE}. Please add valid proxies{Fore.RESET}")
-            return []
-        return proxies
+        return load_proxies()
     if "--no-proxy" in sys.argv:
         return []
 
-    # 3) Interactive fallback (only if stdin is a TTY)
+    # 3) Interactive fallback
     try:
         if sys.stdin is not None and sys.stdin.isatty():
             while True:
@@ -84,20 +95,15 @@ def get_proxy_choice() -> List[str]:
                 if user_input in ("yes", "no"):
                     break
                 print("Invalid input. Please enter 'yes' or 'no'.")
-            logger.info(f"You selected: {'Yes' if user_input == 'yes' else 'No'}, ENJOY!\n")
             if user_input == "yes":
-                proxies = load_proxies()
-                if not proxies:
-                    logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}No proxies found in {PROXIES_FILE}. Please add valid proxies{Fore.RESET}")
-                    return []
-                return proxies
+                return load_proxies()
             return []
     except Exception:
-        # If any issue with interactive input, fall through to non-interactive default
+        # Non-interactive environment
         pass
 
-    # 4) Non-interactive default
-    logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}Non-interactive environment detected and no proxy preference set. Running without proxies{Fore.RESET}")
+    # 4) Default
+    logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}Non-interactive environment and no proxy preference set. Running without proxies{Fore.RESET}")
     return []
 
 
@@ -108,16 +114,13 @@ def assign_proxies(tokens: List[str], proxies: Optional[List[str]]) -> List[Tupl
     """
     if proxies is None:
         proxies = []
-
     paired = list(zip(tokens[: len(proxies)], proxies))
     remaining = [(token, None) for token in tokens[len(proxies) :]]
     return paired + remaining
 
 
 def get_proxy_ip(proxy_url: Optional[str]) -> str:
-    """
-    Extract hostname from proxy URL. Returns 'Unknown' on failure.
-    """
+    """Extract hostname from proxy URL or return 'Unknown'."""
     try:
         if not proxy_url:
             return "Unknown"
@@ -127,47 +130,93 @@ def get_proxy_ip(proxy_url: Optional[str]) -> str:
 
 
 def create_ssl_context() -> ssl.SSLContext:
-    """
-    Create an SSL context that does not verify certificates (useful for self-signed).
-    """
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    return ssl_context
+    """Create an SSL context that does not verify certificates (useful for self-signed)."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
-async def get_ip_address(proxy: Optional[str] = None) -> str:
+async def get_ip_address(proxy: Optional[str] = None, timeout: int = 10) -> str:
     """
     Get public IP address optionally through a proxy.
+    Handles HTTP(S) proxies with proxy_auth and SOCKS proxies if aiohttp_socks is installed.
     Returns the IP string or 'Unknown' on failure.
     """
-    proxy_ip = get_proxy_ip(proxy) if proxy else "Unknown"
-    url = "https://api.ipify.org?format=json"
-    ssl_context = create_ssl_context()
-
+    proxy_ip = "Unknown"
     try:
+        # Clean proxy
+        if proxy:
+            proxy = proxy.strip()
+            parsed = urlparse(proxy)
+            if not parsed.scheme or not parsed.hostname or not parsed.port:
+                logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}Invalid proxy format: {proxy}{Fore.RESET}")
+                proxy = None
+            else:
+                proxy_ip = parsed.hostname
+
+        url = "https://api.ipify.org?format=json"
+        ssl_context = create_ssl_context()
+
+        # If no proxy, simple request
+        if not proxy:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, ssl=ssl_context, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("ip", "Unknown")
+                    logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}Request returned status {resp.status}{Fore.RESET}")
+                    return "Unknown"
+
+        # Proxy present: parse and prepare
+        parsed = urlparse(proxy)
+        scheme = parsed.scheme.lower()
+
+        # If SOCKS and aiohttp_socks available, use ProxyConnector
+        if scheme.startswith("socks"):
+            if not _HAS_AIOHTTP_SOCKS:
+                logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}SOCKS proxy requested but aiohttp_socks is not installed{Fore.RESET}")
+                return proxy_ip
+            # ProxyConnector.from_url accepts full URL with credentials
+            connector = ProxyConnector.from_url(proxy)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url, ssl=ssl_context, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("ip", "Unknown")
+                    logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}Proxy request returned status {resp.status}{Fore.RESET}")
+                    return "Unknown"
+
+        # HTTP(S) proxy: separate credentials from proxy URL
+        proxy_no_auth = urlunparse((parsed.scheme, f"{parsed.hostname}:{parsed.port}", "", "", "", ""))
+        proxy_auth = None
+        if parsed.username or parsed.password:
+            from aiohttp import BasicAuth
+            proxy_auth = BasicAuth(parsed.username or "", parsed.password or "")
+
         async with aiohttp.ClientSession() as session:
-            # aiohttp expects the proxy argument to be a string like "http://user:pass@host:port"
-            async with session.get(url, proxy=proxy, ssl=ssl_context) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    return result.get("ip", "Unknown")
+            async with session.get(url, proxy=proxy_no_auth, proxy_auth=proxy_auth, ssl=ssl_context, timeout=timeout) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("ip", "Unknown")
+                logger.warning(f"{Fore.CYAN}00{Fore.RESET} - {Fore.YELLOW}Proxy request returned status {resp.status}{Fore.RESET}")
                 return "Unknown"
-    except Exception:
-        logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}Request failed: Server disconnected{Fore.RESET}")
-        return proxy_ip
+
+    except Exception as e:
+        logger.error(f"{Fore.CYAN}00{Fore.RESET} - {Fore.RED}Request failed via proxy {proxy_ip}:{Fore.RESET} {e}")
+    return proxy_ip
 
 
-async def resolve_ip(account) -> str:
+async def resolve_ip(account: Any) -> str:
     """
     Resolve IP for an account object that may have a .proxy attribute.
     Returns the resolved IP or 'Unknown' on failure.
     """
     try:
-        if getattr(account, "proxy", None) and str(account.proxy).startswith("http"):
-            return await get_ip_address(account.proxy)
-        else:
-            return await get_ip_address()
+        acct_proxy = getattr(account, "proxy", None)
+        if acct_proxy and isinstance(acct_proxy, str) and acct_proxy.startswith(("http", "socks")):
+            return await get_ip_address(acct_proxy)
+        return await get_ip_address()
     except Exception as e:
         try:
             idx = getattr(account, "index", 0)
