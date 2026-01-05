@@ -10,7 +10,7 @@ jobs:
     env:
       NODEPAY_TOKENS: ${{ secrets.NODEPAY_TOKENS }}
       NODEPAY_PROXIES: ${{ secrets.NODEPAY_PROXIES }}
-      USE_PROXY: 'yes' # optional: used if you applied the patch above
+      USE_PROXY: 'yes'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,7 +29,6 @@ jobs:
       - name: Create tokens and proxies files from secrets
         shell: powershell
         run: |
-          # Write secrets to files without printing them to logs
           if ($env:NODEPAY_TOKENS) {
             Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline -Encoding ASCII
           } else {
@@ -48,19 +47,18 @@ jobs:
           attrib +h proxies.txt
 
       - name: Run bot with automated confirmation fallback
-        shell: powershell
+        shell: cmd
         run: |
-          # Create an input file with many 'yes' responses to satisfy interactive prompts
-          1..200 | ForEach-Object { 'yes' } | Out-File -Encoding ASCII input.txt
-          # Run the batch file using redirected stdin
-          .\run.bat < input.txt
-          # Remove the temporary input file
-          Remove-Item -Path input.txt -Force -ErrorAction SilentlyContinue
+          REM Create an input file with many 'yes' responses (ASCII)
+          for /L %%i in (1,1,200) do @echo yes>> input.txt
+          REM Run the batch file using redirected stdin
+          cmd /c "run.bat < input.txt"
+          REM Remove the temporary input file
+          del /f /q input.txt
 
       - name: Cleanup sensitive files
         if: always()
         shell: powershell
         run: |
-          # Remove files and ensure no output of their contents
           Remove-Item -Path tokens.txt -Force -ErrorAction SilentlyContinue
           Remove-Item -Path proxies.txt -Force -ErrorAction SilentlyContinue
