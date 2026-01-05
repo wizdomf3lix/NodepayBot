@@ -1,4 +1,4 @@
-name: NodepayBot Auto Run
+name: NodepayBot Matrix Run (JSON tokens/proxies)
 
 on:
   workflow_dispatch:
@@ -6,14 +6,22 @@ on:
     - cron: '0 */6 * * *'
 
 jobs:
-  run-nodepaybot:
+  run-instances:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        # Default: 3 instances. Change to [0,1,2,3] for 4 or [0,1,2,3,4] for 5
+        instance_index: [0, 1, 2]
+      fail-fast: false
+
     env:
-      NODEPAY_TOKENS: ${{ secrets.NODEPAY_TOKENS }}
-      NODEPAY_PROXIES: ${{ secrets.NODEPAY_PROXIES }}
-      USE_PROXY: 'yes'                # set to 'yes' or 'no' for non-interactive runs
+      NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
+      NODEPAY_PROXIES_JSON: ${{ secrets.NODEPAY_PROXIES_JSON }}
+      INSTANCE_INDEX: ${{ matrix.instance_index }}
+      USE_PROXY: 'yes'   # optional: used if your code reads USE_PROXY
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -21,16 +29,56 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install requirements
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Create tokens and proxies files from secrets
+      - name: Install requirements (if present)
         shell: powershell
         run: |
-          Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline
-          Set-Content -Path proxies.txt -Value $env:NODEPAY_PROXIES -NoNewline
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+      - name: Select token and proxy from JSON secrets and write files
+        shell: powershell
+        run: |
+          # Do not echo secrets. Parse JSON and select by index.
+          $idx = [int]$env:INSTANCE_INDEX
+
+          # Parse tokens JSON secret
+          if ($env:NODEPAY_TOKENS_JSON) {
+            try {
+              $tokens = ConvertFrom-Json -InputObject $env:NODEPAY_TOKENS_JSON
+            } catch {
+              Write-Error "Failed to parse NODEPAY_TOKENS_JSON. Ensure it's valid JSON array."
+              exit 1
+            }
+          } else {
+            $tokens = @()
+          }
+
+          # Parse proxies JSON secret (optional)
+          if ($env:NODEPAY_PROXIES_JSON) {
+            try {
+              $proxies = ConvertFrom-Json -InputObject $env:NODEPAY_PROXIES_JSON
+            } catch {
+              Write-Error "Failed to parse NODEPAY_PROXIES_JSON. Ensure it's valid JSON array."
+              exit 1
+            }
+          } else {
+            $proxies = @()
+          }
+
+          # Select token and proxy safely (empty string if out of range)
+          $selectedToken = ""
+          if ($idx -lt $tokens.Count) { $selectedToken = $tokens[$idx] }
+
+          $selectedProxy = ""
+          if ($idx -lt $proxies.Count) { $selectedProxy = $proxies[$idx] }
+
+          # Write selected token and proxy to files without printing them
+          Set-Content -Path tokens.txt -Value $selectedToken -NoNewline -Encoding UTF8
+          Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
+
+          # Export selected values to subsequent steps (masked in logs)
+          echo "TOKEN_SELECTED=$selectedToken" >> $env:GITHUB_ENV
+          echo "PROXY_SELECTED=$selectedProxy" >> $env:GITHUB_ENV
 
       - name: Hide sensitive files
         shell: powershell
@@ -38,11 +86,21 @@ jobs:
           attrib +h tokens.txt
           attrib +h proxies.txt
 
-      - name: Run bot (non-interactive via USE_PROXY)
-        shell: powershell
+      - name: Run bot with automated confirmation fallback
+        shell: cmd
         run: |
-          # If you patched the code to read USE_PROXY, no stdin piping is needed
-          .\run.bat
+          REM Create an input file with many 'yes' responses (adjust to 'y' if needed)
+          for /L %%i in (1,1,200) do @echo yes>> input.txt
+
+          REM Set environment variables for the batch if it reads them
+          set PROXY=%PROXY_SELECTED%
+          set TOKEN=%TOKEN_SELECTED%
+
+          REM Run the batch file using redirected stdin
+          cmd /c "run.bat < input.txt"
+
+          REM Remove the temporary input file
+          del /f /q input.txt
 
       - name: Cleanup sensitive files
         if: always()
