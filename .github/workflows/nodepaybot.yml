@@ -18,7 +18,7 @@ jobs:
       NODEPAY_TOKENS_JSON: ${{ secrets.NODEPAY_TOKENS_JSON }}
       NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
       INSTANCE_INDEX: ${{ matrix.instance_index }}
-      USE_PROXY: 'yes'
+      USE_PROXY: 'no'
 
     steps:
       - name: Checkout repository
