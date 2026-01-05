@@ -100,9 +100,10 @@ jobs:
           # Write selected proxy to proxies.txt (no newline)
           Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
           # Export selected values to GITHUB_ENV for later steps (do NOT export full token)
-          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_MASK=" + (if ($selectedProxy) { $selectedProxy.Substring(0,[Math]::Min(6,$selectedProxy.Length)) + "..." + $selectedProxy.Substring([Math]::Max(0,$selectedProxy.Length-6)) } else { "none" }))
+          $mask = if ($selectedProxy) { $selectedProxy.Substring(0,[Math]::Min(6,$selectedProxy.Length)) + "..." + $selectedProxy.Substring([Math]::Max(0,$selectedProxy.Length-6)) } else { "none" }
+          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_MASK=" + $mask)
           Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_PRESENT=" + ([bool]($selectedProxy -ne "")))
-          # Also export the actual proxy for steps that need it (careful: this writes secret-like data into job env; it's ephemeral)
+          # Also export the actual proxy for steps that need it (ephemeral)
           Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED=" + $selectedProxy)
 
       - name: Confirm proxies.txt (masked)
