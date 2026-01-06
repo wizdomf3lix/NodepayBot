@@ -1,22 +1,15 @@
-name: NodepayBot Matrix Run (single token, per-instance proxies)
+name: NodepayBot Auto Run
 
 on:
+  
   workflow_dispatch:
 
 jobs:
-  run-instances:
+  run-nodepaybot:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        instance_index: [0, 1, 2]
-      fail-fast: false
-
     env:
-      NODEPAY_TOKEN: ${{ secrets.NODEPAY_TOKEN }}
-      NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
-      INSTANCE_INDEX: ${{ matrix.instance_index }}
-      USE_PROXY: 'no'
-
+      NODEPAY_TOKENS: ${{ secrets.NODEPAY_TOKENS }}
+      NODEPAY_PROXIES: ${{ secrets.NODEPAY_PROXIES }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,199 +19,29 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install requirements (if present) and HTTP libs
-        shell: powershell
+      - name: Install requirements
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          pip install requests aiohttp aiohttp-socks --no-input
+          pip install -r requirements.txt
 
-      - name: Validate single NODEPAY_TOKEN (masked) and write tokens.txt
-        shell: powershell
-        env:
-          NODEPAY_TOKEN: ${{ secrets.NODEPAY_TOKEN }}
-        run: |
-          if (-not $env:NODEPAY_TOKEN) {
-            Write-Error "NODEPAY_TOKEN secret is empty. Set the secret and retry."
-            exit 1
-          }
-          $token = $env:NODEPAY_TOKEN.Trim()
-          if (-not $token) {
-            Write-Error "NODEPAY_TOKEN is empty after trimming."
-            exit 1
-          }
-          $len = $token.Length
-          $start = $token.Substring(0,[Math]::Min(6,$len))
-          $end = $token.Substring([Math]::Max(0,$len-6))
-          Write-Output "NODEPAY token length: $len"
-          Write-Output "NODEPAY token sample: $start...$end"
-          Set-Content -Path tokens.txt -Value $token -NoNewline -Encoding UTF8
-          Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED_MASK=${start}...${end}"
-          Add-Content -Path $env:GITHUB_ENV -Value "TOKEN_SELECTED_PRESENT=true"
-
-      - name: Confirm tokens.txt on disk (masked)
+      - name: Create tokens and proxies files from secrets
         shell: powershell
         run: |
-          if (-not (Test-Path tokens.txt)) { Write-Error "tokens.txt not found"; exit 1 }
-          $t = Get-Content tokens.txt -Raw
-          $len = $t.Length
-          $start = $t.Substring(0,[Math]::Min(6,$len))
-          $end = $t.Substring([Math]::Max(0,$len-6))
-          Write-Output "tokens.txt length: $len"
-          Write-Output "tokens.txt sample: $start...$end"
+          # Write secrets to files (preserves newlines)
+          Set-Content -Path tokens.txt -Value $env:NODEPAY_TOKENS -NoNewline
+          Set-Content -Path proxies.txt -Value $env:NODEPAY_PROXIES -NoNewline
 
-      - name: Parse proxies secret and select proxy for this instance
-        shell: powershell
-        env:
-          NODEPAY_PROXIES_RAW: ${{ secrets.NODEPAY_PROXIES_RAW }}
-          INSTANCE_INDEX: ${{ matrix.instance_index }}
-        run: |
-          $raw = $env:NODEPAY_PROXIES_RAW
-          function Parse-Proxies($raw) {
-            if (-not $raw) { return @() }
-            try {
-              $p = ConvertFrom-Json -InputObject $raw
-              if ($p -is [System.Array]) { return ,$p }
-            } catch { }
-            return ($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-          }
-          $proxies = Parse-Proxies $raw
-          $idx = [int]$env:INSTANCE_INDEX
-          $selectedProxy = ""
-          if ($proxies.Count -gt 0 -and $idx -lt $proxies.Count) {
-            $selectedProxy = $proxies[$idx]
-          } else {
-            $selectedProxy = ""
-          }
-          Set-Content -Path proxies.txt -Value $selectedProxy -NoNewline -Encoding UTF8
-          $mask = if ($selectedProxy) { $selectedProxy.Substring(0,[Math]::Min(6,$selectedProxy.Length)) + "..." + $selectedProxy.Substring([Math]::Max(0,$selectedProxy.Length-6)) } else { "none" }
-          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_MASK=" + $mask)
-          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED_PRESENT=" + ([bool]($selectedProxy -ne "")))
-          Add-Content -Path $env:GITHUB_ENV -Value ("PROXY_SELECTED=" + $selectedProxy)
-
-      - name: Confirm proxies.txt (masked)
+      - name: Hide sensitive files (Windows hidden attribute)
         shell: powershell
         run: |
-          if (-not (Test-Path proxies.txt)) { Write-Output "proxies.txt not present (no proxy for this instance)"; exit 0 }
-          $p = Get-Content proxies.txt -Raw
-          $p = $p.Trim()
-          if (-not $p) { Write-Output "proxies.txt is empty"; exit 0 }
-          $len = $p.Length
-          $start = $p.Substring(0,[Math]::Min(6,$len))
-          $end = $p.Substring([Math]::Max(0,$len-6))
-          Write-Output ("proxies.txt length: {0}" -f $len)
-          Write-Output ("proxies.txt sample: {0}...{1}" -f $start, $end)
+          attrib +h tokens.txt
+          attrib +h proxies.txt
 
-      - name: API test using token (masked) with proxy auth handling
+      - name: Run bot (auto-confirm yes)
         shell: powershell
         run: |
-          if (-not (Test-Path tokens.txt)) {
-            Write-Error "tokens.txt not found for API test"
-            exit 1
-          }
-          $token = (Get-Content tokens.txt -Raw).Trim()
-          if (-not $token) {
-            Write-Error "Token empty for API test"
-            exit 1
-          }
-          Write-Output ("Token length: {0}" -f $token.Length)
-          $start = $token.Substring(0,[Math]::Min(6,$token.Length))
-          $end = $token.Substring([Math]::Max(0,$token.Length-6))
-          Write-Output ("Token sample: {0}...{1}" -f $start, $end)
-
-          $API_URL = "https://api.nodepay.ai/v1/profile"
-          $headers = @{ Authorization = "Bearer $token" }
-
-          $proxy = ""
-          if (Test-Path proxies.txt) {
-            $proxy = (Get-Content proxies.txt -Raw).Trim()
-          }
-
-          function Normalize-ProxyUri($rawProxy) {
-            if (-not $rawProxy) { return $null }
-            # If proxy lacks scheme, assume http
-            if ($rawProxy -notmatch '^[a-zA-Z]+://') { $rawProxy = "http://$rawProxy" }
-            try {
-              return [uri]$rawProxy
-            } catch {
-              return $null
-            }
-          }
-
-          $u = Normalize-ProxyUri $proxy
-          try {
-            if ($u -and $u.UserInfo) {
-              # Proxy contains credentials user:pass@host:port
-              $parts = $u.UserInfo.Split(":",2)
-              $user = $parts[0]
-              $pass = if ($parts.Count -gt 1) { $parts[1] } else { "" }
-              $proxyUri = "$($u.Scheme)://$($u.Host)"
-              if ($u.Port -and $u.Port -ne 0) { $proxyUri = "$proxyUri`:$($u.Port)" }
-              $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
-              $cred = New-Object System.Management.Automation.PSCredential($user, $securePass)
-              Write-Output "Using proxy with credentials (host masked): $($u.Host):$($u.Port)"
-              $response = Invoke-WebRequest -Uri $API_URL -Headers $headers -UseBasicParsing -Proxy $proxyUri -ProxyCredential $cred -TimeoutSec 10
-            } elseif ($u) {
-              # Proxy without credentials
-              $proxyUri = "$($u.Scheme)://$($u.Host)"
-              if ($u.Port -and $u.Port -ne 0) { $proxyUri = "$proxyUri`:$($u.Port)" }
-              Write-Output "Using proxy (host masked): $($u.Host):$($u.Port)"
-              $response = Invoke-WebRequest -Uri $API_URL -Headers $headers -UseBasicParsing -Proxy $proxyUri -TimeoutSec 10
-            } else {
-              # No proxy configured, direct request
-              Write-Output "No proxy configured, sending direct request"
-              $response = Invoke-WebRequest -Uri $API_URL -Headers $headers -UseBasicParsing -TimeoutSec 10
-            }
-
-            Write-Output ("API test status: {0}" -f $response.StatusCode)
-            $snippet = ($response.Content -replace "`r?`n"," ")
-            if ($snippet.Length -gt 200) { $snippet = $snippet.Substring(0,200) }
-            Write-Output ("Response snippet: {0}" -f $snippet)
-
-            if ($response.StatusCode -eq 401 -or $response.StatusCode -eq 403) {
-              Write-Error "Token appears invalid or expired (401/403)."
-              exit 2
-            } elseif ($response.StatusCode -ge 400) {
-              Write-Error ("API returned error status {0}" -f $response.StatusCode)
-              exit 3
-            } else {
-              Write-Output "API test succeeded (token accepted)."
-            }
-          } catch {
-            $err = $_.Exception
-            # If proxy requires auth, show clear guidance without leaking credentials
-            if ($err.Message -match "407") {
-              Write-Error "API test request failed: Proxy requires authentication (407). Ensure proxy credentials are included in NODEPAY_PROXIES_RAW as user:pass@host:port or scheme://user:pass@host:port."
-            } else {
-              Write-Error ("API test request failed: {0}" -f $err.Message)
-            }
-            exit 4
-          }
-
-      - name: Hide sensitive files
-        shell: powershell
-        run: |
-          if (Test-Path tokens.txt) { attrib +h tokens.txt }
-          if (Test-Path proxies.txt) { attrib +h proxies.txt }
-
-      - name: Run bot with automated confirmation fallback
-        shell: cmd
-        env:
-          USE_PROXY: ${{ env.USE_PROXY }}
-        run: |
-          if exist input.txt del /f /q input.txt
-          for /L %%i in (1,1,200) do @echo yes>> input.txt
-          setlocal enabledelayedexpansion
-          if exist tokens.txt (
-            for /f "usebackq delims=" %%T in ("tokens.txt") do set "TOKEN=%%T"
-          )
-          if exist proxies.txt (
-            for /f "usebackq delims=" %%P in ("proxies.txt") do set "PROXY=%%P"
-          )
-          set "USE_PROXY=%USE_PROXY%"
-          cmd /c "run.bat < input.txt"
-          del /f /q input.txt
-          endlocal
+          # Pipe 'yes' to run.bat to auto-confirm prompts
+          echo yes | .\run.bat
 
       - name: Cleanup sensitive files
         if: always()
